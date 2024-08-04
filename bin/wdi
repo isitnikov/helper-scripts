@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
+valid_versions=("7.2" "7.3" "7.4" "8.1" "8.2" "8.3")
+trap "exit" INT
+
+function is_valid_version() {
+  local version=$1
+  for v in "${valid_versions[@]}"; do
+    if [[ "$v" == "$version" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
 
 convertsecs() {
  ((h=${1}/3600))
@@ -6,6 +18,23 @@ convertsecs() {
  ((s=${1}%60))
  printf "%02d:%02d:%02d\n" $h $m $s
 }
+
+spin() {
+  local pid=$1
+  local message=$2
+  local delay=0.1
+  local spinstr='|/-\'
+  while [ "$(ps a | awk '{print $1}' | grep $pid)" ]; do
+    local temp=${spinstr#?}
+    printf " [  %c  ] %s\r" "$spinstr" "$message"
+    local spinstr=$temp${spinstr%"$temp"}
+    sleep $delay
+  done
+  printf "    \b\b\b\b[ Done ]"
+  echo ""
+}
+
+# (your_command_here) & pid=$!
 
 getSourceDirOfScript () {
   local SOURCE=${BASH_SOURCE[0]}
@@ -125,7 +154,9 @@ EOF
 
 varden_init_env () {
   warden env-init ${PROJECT_NAME} magento2
-  warden sign-certificate ${PROJECT_NAME}.test
+  (warden sign-certificate ${PROJECT_NAME}.test > /dev/null 2>&1) & pid=$!
+  # (warden sign-certificate ${PROJECT_NAME}.test >> install.${START_TIME_OF_EXECUTION}.log 2>&1) & pid=$!
+  spin $pid "Signing certificate..."
 }
 
 init_project () {
@@ -138,25 +169,32 @@ init_project () {
 
   local PHP_VERSION=${1}
 
-  if [[ "${PHP_VERSION}" == *"7.3"* || "${PHP_VERSION}" == *"73"* ]]
-  then
-      sed -i '' 's/PHP_VERSION=7.4/PHP_VERSION=7.3/g' .env
-  fi
+  case "${PHP_VERSION}" in
+    *"7.2"*|*"72"*)
+      new_version="7.2"
+      ;;
+    *"7.3"*|*"73"*)
+      new_version="7.3"
+      ;;
+    *"7.4"*|*"74"*)
+      new_version="7.4"
+      ;;
+    *"8.1"*|*"81"*)
+      new_version="8.1"
+      ;;
+    *"8.2"*|*"82"*)
+      new_version="8.2"
+      ;;
+    *"8.3"*|*"83"*)
+      new_version="8.3"
+      ;;
+    *)
+      echo "Unknown PHP version."
+      exit 1
+      ;;
+  esac
 
-  if [[ "${PHP_VERSION}" == *"7.2"* || "${PHP_VERSION}" == *"72"* ]]
-  then
-      sed -i '' 's/PHP_VERSION=7.4/PHP_VERSION=7.3/g' .env
-  fi
-
-  if [[ "${PHP_VERSION}" == *"8.1"* || "${PHP_VERSION}" == *"81"* ]]
-  then
-      sed -i '' 's/PHP_VERSION=7.4/PHP_VERSION=8.1/g' .env
-  fi
-
-  if [[ "${PHP_VERSION}" == *"8.2"* || "${PHP_VERSION}" == *"82"* ]]
-    then
-        sed -i '' 's/PHP_VERSION=7.4/PHP_VERSION=8.1/g' .env
-    fi
+  sed -i '' "s/PHP_VERSION=[0-9]\{1,\}\.[0-9]\{1,\}/PHP_VERSION=${new_version}/g" .env
 
   cd ../
 }
@@ -166,8 +204,7 @@ START_TIME_OF_EXECUTION=`date +%s`
 SCRIPT_DIR=$(getSourceDirOfScript)
 
 CURRENT_VERSION=$(cat ${SCRIPT_DIR}/../version.txt)
-LAST_VERSION=$(curl -H 'Cache-Control: no-cache, no-store' -m 3 https://raw.githubusercontent.com/npuchko/helper-scripts/master/version.txt)
-
+LAST_VERSION=$(curl -s -H 'Cache-Control: no-cache, no-store' -m 3 https://raw.githubusercontent.com/npuchko/helper-scripts/master/version.txt)
 
 if [ "$CURRENT_VERSION" != "$LAST_VERSION" ]
   then
@@ -185,42 +222,33 @@ if [ "$CURRENT_VERSION" != "$LAST_VERSION" ]
     echo -e "Version of checker \033[32m$CURRENT_VERSION\033[0m"
 fi;
 
-
-
 if [ -z "$1" ]
 then
-      read -p 'Enter JIRA ticket number (empty for using current folder): ' PROJECT_NAME
+  read -p 'Enter JIRA ticket number (empty for using current folder): ' PROJECT_NAME
 else
   PROJECT_NAME=$1
-
   echo "Project name is: ${PROJECT_NAME}"
 fi
 
 if [ -z "$2" ]
 then
-      read -p 'Enter cloud project ID: ' CLOUD_PROJECT_ID
+  read -p 'Enter cloud project ID: ' CLOUD_PROJECT_ID
 else
   CLOUD_PROJECT_ID=$2
-
   echo "Cloud project ID  is: ${CLOUD_PROJECT_ID}"
 fi
-
-
 
 if [ -n "$CLOUD_PROJECT_ID" ]
 then
   if [ -z "$3" ]
   then
-        magento-cloud env:list -p ${CLOUD_PROJECT_ID} -I --format plain --pipe
-        read -p 'Enter environment ID: ' CLOUD_ENV_ID
+    magento-cloud env:list -p ${CLOUD_PROJECT_ID} -I --format plain --pipe
+    read -p 'Enter environment ID: ' CLOUD_ENV_ID
   else
     CLOUD_ENV_ID=$3
-
     echo "Cloud environment ID  is: ${CLOUD_ENV_ID}"
   fi
 fi
-
-
 
 PROJECT_NAME="${PROJECT_NAME//-/}"
 PROJECT_NAME=$(echo "$PROJECT_NAME" |  tr '[:upper:]' '[:lower:]' )
@@ -240,7 +268,8 @@ SSH_HOST=""
 if [ -z "$CLOUD_PROJECT_ID" ]
 then
       echo "project id not specified. Try to find php*.code.tar.gz in this dir"
-      PHP_VERSION="$(ls  php*.code.tar.gz | sort -V | tail -n1)"
+      PHP_VERSION="$(ls  php*.code.tar.gz 2>/dev/null | sort -V | tail -n1)"
+
 else
       SSH_HOST=`eval magento-cloud environment:ssh --all --project $CLOUD_PROJECT_ID -e $CLOUD_ENV_ID --pipe`
       SSH_HOST=$(echo "$SSH_HOST" | head -1)
@@ -255,25 +284,70 @@ else
 
 fi
 
+if [ -z "$PHP_VERSION" ]; then
+  while true; do
+    read -p "PHP version not found. Please enter a valid version (${valid_versions[*]}) or press Enter to use 8.1: " input_version
+    input_version="${input_version:-8.1}"
+    if is_valid_version "$input_version"; then
+      PHP_VERSION="$input_version"
+      break
+    else
+      echo "Invalid version entered. Please enter one of the following: ${valid_versions[*]}."
+    fi
+  done
+fi
+
+echo "Using PHP version: $PHP_VERSION"
 
 # output only after full result
-echo "$(init_project ${PHP_VERSION})" &
+echo "$(init_project ${PHP_VERSION})"
+
+CODE_FILE="$(ls  php*.code.tar.gz code.tgz 2>/dev/null | sort -V | tail -n1)"
+DATABASE_FILE="$(ls  php*.database.sql.gz database.sql.gz 2>/dev/null | sort -V | tail -n1)"
 
 if [ -n "$CLOUD_PROJECT_ID" ]
 then
-      cloud-teleport ${SSH_HOST} dump
+  NEED_DUMPS=1
+  if [ -f "$CODE_FILE" ] && [ -f "$DATABASE_FILE" ]; then
+      read -p "Seems like dumps exist. Do you want to create them again? (y/n, default 'n'): " response
+      response=${response:-n}
+      if [[ "$response" != "y" ]]; then
+        NEED_DUMPS=0
+        echo "Creating dumps skipped."
+      fi
+  fi
+
+  if [ "${NEED_DUMPS:-1}" -eq 1 ]; then
+    echo "Creating dumps..."
+    cloud-teleport ${SSH_HOST} dump
+    echo "Dumps created successfully!"
+    CODE_FILE="$(ls  php*.code.tar.gz code.tgz 2>/dev/null | sort -V | tail -n1)"
+    DATABASE_FILE="$(ls  php*.database.sql.gz database.sql.gz 2>/dev/null | sort -V | tail -n1)"
+  fi
 fi
 
-CODE_FILE="$(ls  php*.code.tar.gz | sort -V | tail -n1)"
-DATABASE_FILE="$(ls  php*.database.sql.gz | sort -V | tail -n1)"
-
 wait
+#spin $pid "Waiting..."
 
+CODE_INIT=
 unpack_code () {
   if [ -n "${CODE_FILE}" ]
   then
-    echo "Unpacking code..."
-    tar -xzf ${CODE_FILE} -C ./source
+    if [ -f "./source/composer.json" ] && [ -f "./source/bin/magento" ]  && [ -f "./source/app/etc/env.php.autobackup" ]; then
+      CODE_INIT=1
+      read -p "Seems like code is already unpacked. Do you want to unpack again? (y/n, default 'n'): " response
+      response=${response:-n}
+      if [[ "$response" != "y" ]]; then
+        echo "Code unpacking skipped."
+        exit 0
+      fi
+    fi
+
+    if command -v pv &> /dev/null; then
+      pv -p --name "Unpacking code..." $CODE_FILE | tar -xzf - -C ./source
+    else
+      tar -xzf $CODE_FILE -C ./source
+    fi
   fi
 }
 
@@ -285,55 +359,81 @@ echo  "$(unpack_code)" &
 wait
 
 cd source
-warden env up
+(warden env up > /dev/null 2>&1) & pid=$!
+spin $pid "Init environment..."
 
-
+DB_IMPORT=
 if [ -n "${DATABASE_FILE}" ]
 then
-  echo "[" $(date -u) "Importing db dump..."
-  echo -e "\033[31m"
+#  echo "[" $(date -u) "Importing db dump..."
+#  echo -e "\033[31m"
+# @TODO check if deployed
+  read -p "Do you want to re-import database dump? (y/n, default 'n'): " response
+  response=${response:-n}
+  if [[ "$response" != "y" ]]; then
+    echo "Code unpacking skipped."
+  else
+    DB_IMPORT=1
+    sed_commands="sed -e 's/DEFINER[ ]*=[ ]*[^*]*\*/\*/' \
+      -e 's/TRIGGER[ ][\`][A-Za-z0-9_]*[\`][.]/TRIGGER /' \
+      -e 's/utf8mb4_0900_ai_ci/utf8_general_ci/' \
+      -e 's/utf8mb4_unicode_ci/utf8_general_ci/' \
+      -e 's/utf8mb4_unicode_520_ci/utf8_general_ci/' \
+      -e 's/CHARSET=utf8mb4/CHARSET=utf8/g' \
+      -e 's/AFTER[ ]\(INSERT\)\{0,1\}\(UPDATE\)\{0,1\}\(DELETE\)\{0,1\}[ ]ON[ ][\`][A-Za-z0-9_]*[\`][.]/AFTER \1\2\3 ON /' \
+      | grep -v 'mysqldump: Couldn.t find table' | grep -v 'mysqldump: Couldn.t execute' | grep -v 'Warning: Using a password' \
+      | grep -v 'mysqldump: ' | grep -v 'ALTER DATABASE' \
+      | warden db import"
 
-  gunzip -cf ../${DATABASE_FILE} | sed -e 's/DEFINER[ ]*=[ ]*[^*]*\*/\*/' \
-          | sed -e 's/TRIGGER[ ][`][A-Za-z0-9_]*[`][.]/TRIGGER /' \
-          | sed -e 's/utf8mb4_0900_ai_ci/utf8_general_ci/' \
-          | sed -e 's/utf8mb4_unicode_ci/utf8_general_ci/' \
-          | sed -e 's/utf8mb4_unicode_520_ci/utf8_general_ci/' \
-          | sed -e 's/CHARSET=utf8mb4/CHARSET=utf8/g' \
-          | sed -e 's/AFTER[ ]\(INSERT\)\{0,1\}\(UPDATE\)\{0,1\}\(DELETE\)\{0,1\}[ ]ON[ ][`][A-Za-z0-9_]*[`][.]/AFTER \1\2\3 ON /' \
-          | grep -v 'mysqldump: Couldn.t find table' | grep -v 'mysqldump: Couldn.t execute' | grep -v 'Warning: Using a password' \
-          | grep -v 'mysqldump: ' | grep -v 'ALTER DATABASE' \
-          | warden db import
-
-  echo -e "\033[0m"
-  echo "[" $(date -u) "Import of db dump finished"
+    if command -v pv &> /dev/null; then
+      pv -p --name "Importing database dump..." ../${DATABASE_FILE} | gunzip -cf | eval $sed_commands
+    else
+      gunzip -cf ../${DATABASE_FILE} | eval $sed_commands
+    fi
+  fi
+#  echo -e "\033[0m"
+#  echo "[" $(date -u) "Import of db dump finished"
 fi
-
 
 wait
 
+#    if [ -f "source/composer.json" ] || [ -f "source/bin/magento" ]  || [ -f "source/app/etc/env.php.merchant" ]; then
+#      read -p "Seems like code is already unpacked. Do you want to unpack again? (y/n, default 'n'): " response
+#      response=${response:-n}
+#      if [[ "$response" != "y" ]]; then
+#        echo "Code unpacking skipped."
+#        exit 0
+#      fi
+#    fi
 # Replacing env.php and db configs
 
-warden env exec -T php-fpm chmod -R +x ./warden_deploy_scripts/*
-warden env exec -T php-fpm /bin/sh ./warden_deploy_scripts/composer-deploy.sh
+if [ "${CODE_INIT:-0}" -eq 1 ] || [ "${DB_IMPORT:-0}" -eq 1 ]; then
+  warden env exec -T php-fpm chmod -R +x ./warden_deploy_scripts/* >> install.${START_TIME_OF_EXECUTION}.log 2>&1
 
+  (warden env exec -T php-fpm /bin/sh ./warden_deploy_scripts/composer-deploy.sh >> install.${START_TIME_OF_EXECUTION}.log 2>&1) & pid=$!
+  spin $pid "Composer deploy..."
 
-warden env exec -T php-fpm php ./warden_deploy_scripts/replace-scripts.php env
-warden env exec -T php-fpm php ./warden_deploy_scripts/replace-scripts.php conf
+  (warden env exec -T php-fpm php ./warden_deploy_scripts/replace-scripts.php env >> install.${START_TIME_OF_EXECUTION}.log 2>&1) & pid=$!
+  spin $pid "Replacing environment scripts..."
 
-REPLACE_SCRIPTS_COMMAND=$(warden env exec -T php-fpm php ./warden_deploy_scripts/replace-scripts.php db)
-echo "${REPLACE_SCRIPTS_COMMAND}"
-HOSTS_COMMAND=$(echo "${REPLACE_SCRIPTS_COMMAND}" | grep HOSTS_COMMAND | sed -u "s/HOSTS_COMMAND=//g")
+  (warden env exec -T php-fpm php ./warden_deploy_scripts/replace-scripts.php conf >> install.${START_TIME_OF_EXECUTION}.log 2>&1) & pid=$!
+  spin $pid "Replacing configuration scripts..."
 
+  REPLACE_SCRIPTS_COMMAND=$(warden env exec -T php-fpm php ./warden_deploy_scripts/replace-scripts.php db)
+  echo "${REPLACE_SCRIPTS_COMMAND}" && echo "${REPLACE_SCRIPTS_COMMAND}" >>  install.${START_TIME_OF_EXECUTION}.log 2>&1
 
-warden env exec -T php-fpm /bin/sh ./warden_deploy_scripts/magento-deploy.sh
+  HOSTS_COMMAND=$(echo "${REPLACE_SCRIPTS_COMMAND}" | grep HOSTS_COMMAND | sed -u "s/HOSTS_COMMAND=//g")
+
+  warden env exec -T php-fpm /bin/sh ./warden_deploy_scripts/magento-deploy.sh >> install.${START_TIME_OF_EXECUTION}.log 2>&1
+
+  eval $HOSTS_COMMAND
+fi
 
 END_TIME_OF_EXECUTION=`date +%s`
 TOTAL_TIME_OF_EXECUTION=$((END_TIME_OF_EXECUTION-START_TIME_OF_EXECUTION))
 echo TOTAL time of execution is: $(convertsecs TOTAL_TIME_OF_EXECUTION)
-
-
 echo "https://app.${PROJECT_NAME}.test/"
 echo "https://app.${PROJECT_NAME}.test/admin/"
 echo "Login: admin, password: 123123q"
-echo "cd ${PROJECT_NAME}/source"
-eval $HOSTS_COMMAND
+echo "Install log: $(pwd)/install.${START_TIME_OF_EXECUTION}.log"
+echo "Source path: $(pwd)"

@@ -1,9 +1,9 @@
 # Installation
 
 1. Have magento-cloud installed and configured with API TOKEN.
-2. Have cloud-teleport installed and configured
-3. Have warden from this repo and branch https://github.com/npuchko/warden-multi-arch/tree/warden_for_mac_m1
-4. Have this repo cloned ```git clone git@github.com:npuchko/helper-scripts.git```
+2. Have cloud-dump installed and configured
+3. Have warden installed Warden. Use command: ```brew install wardenenv/warden/warden && warden svc up```
+4. Have this repo cloned. Use command: ```git clone git@github.com:npuchko/helper-scripts.git```
 5. Create symlinks to bin files:
 ```shell
 sudo ln -s /path/to/this/repo/cloned/bin/wdi /usr/local/bin/wdi
