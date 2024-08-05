@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+
+# In case of Traefik errors, try solution https://github.com/docker/for-mac/issues/6677#issuecomment-1382313815
+
 valid_versions=("7.2" "7.3" "7.4" "8.1" "8.2" "8.3")
 trap "exit" INT
 
