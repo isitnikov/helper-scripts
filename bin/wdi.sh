@@ -2,7 +2,7 @@
 
 # In case of Traefik errors, try solution https://github.com/docker/for-mac/issues/6677#issuecomment-1382313815
 
-valid_versions=("7.2" "7.3" "7.4" "8.1" "8.2" "8.3")
+valid_versions=("7.2" "7.3" "7.4" "8.1" "8.2" "8.3" "8.4")
 trap "exit" INT
 
 function is_valid_version() {
@@ -171,6 +171,9 @@ init_project () {
   cp -R ${SCRIPT_DIR}/.warden ./.warden
 
   local PHP_VERSION=${1}
+  local SEARCH_ENGINE=${2}
+  local SEARCH_ENGINE_VERSION=${3}
+  local MARIADB_VERSION=${4}
 
   case "${PHP_VERSION}" in
     *"7.2"*|*"72"*)
@@ -191,13 +194,34 @@ init_project () {
     *"8.3"*|*"83"*)
       new_version="8.3"
       ;;
+    *"8.4"*|*"84"*)
+      new_version="8.4"
+      ;;
     *)
       echo "Unknown PHP version."
       exit 1
       ;;
   esac
 
-  sed -i '' "s/PHP_VERSION=[0-9]\{1,\}\.[0-9]\{1,\}/PHP_VERSION=${new_version}/g" .env
+  # --- macOS / Linux сумісний sed ---
+  SED_OPT=(-i)
+  [[ "$OSTYPE" == "darwin"* ]] && SED_OPT=(-i '')
+
+  sed "${SED_OPT[@]}" "s/PHP_VERSION=[0-9]\{1,\}\.[0-9]\{1,\}/PHP_VERSION=${new_version}/g" .env
+  sed "${SED_OPT[@]}" "s/MYSQL_DISTRIBUTION_VERSION=[0-9]\{1,\}\.[0-9]\{1,\}/MYSQL_DISTRIBUTION_VERSION=${MARIADB_VERSION}/g" .env
+
+  # --- Оновлення .env ---
+  if [[ "$SEARCH_ENGINE" == "opensearch" ]]; then
+    sed "${SED_OPT[@]}" "s/^WARDEN_ELASTICSEARCH=.*/WARDEN_ELASTICSEARCH=0/" .env
+    sed "${SED_OPT[@]}" "s/^WARDEN_OPENSEARCH=.*/WARDEN_OPENSEARCH=1/" .env
+    sed "${SED_OPT[@]}" "s/^ELASTICSEARCH_VERSION=.*/ELASTICSEARCH_VERSION=0/" .env
+    sed "${SED_OPT[@]}" "s/^OPENSEARCH_VERSION=.*/OPENSEARCH_VERSION=${SEARCH_ENGINE_VERSION}/" .env
+  else
+    sed "${SED_OPT[@]}" "s/^WARDEN_ELASTICSEARCH=.*/WARDEN_ELASTICSEARCH=1/" .env
+    sed "${SED_OPT[@]}" "s/^WARDEN_OPENSEARCH=.*/WARDEN_OPENSEARCH=0/" .env
+    sed "${SED_OPT[@]}" "s/^OPENSEARCH_VERSION=.*/OPENSEARCH_VERSION=0/" .env
+    sed "${SED_OPT[@]}" "s/^ELASTICSEARCH_VERSION=.*/ELASTICSEARCH_VERSION=${SEARCH_ENGINE_VERSION}/" .env
+  fi
 
   cd ../
 }
@@ -224,6 +248,8 @@ if [ "$CURRENT_VERSION" != "$LAST_VERSION" ]
   else
     echo -e "Version of checker \033[32m$CURRENT_VERSION\033[0m"
 fi;
+
+MAGENTO_VERSION="2.4.8"
 
 if [ -z "$1" ]
 then
@@ -270,7 +296,7 @@ DATABASE_CONNECTION_DATA=""
 SSH_HOST=""
 if [ -z "$CLOUD_PROJECT_ID" ]
 then
-      echo "project id not specified. Try to find php*.code.tar.gz in this dir"
+      echo "Project id not specified. Try to find php*.code.tar.gz in this dir"
       PHP_VERSION="$(ls  php*.code.tar.gz 2>/dev/null | sort -V | tail -n1)"
 
 else
@@ -285,12 +311,40 @@ else
       DATABASE_CONNECTION_DATA=$(magento-cloud environment:relationships  -p $CLOUD_PROJECT_ID -e $CLOUD_ENV_ID --property database.0)
       echo "Database connection data ${DATABASE_CONNECTION_DATA}"
 
+      MAGENTO_VERSION=$(magento-cloud ssh -p $CLOUD_PROJECT_ID -e $CLOUD_ENV_ID 'bin/magento -V'| awk '{print $3}')
+fi
+
+BASE_VER="$(echo "$MAGENTO_VERSION" | sed -E 's/^[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+).*/\1/')"
+
+ver_ge() { [ "$(printf '%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]; } # $1 >= $2
+ver_le() { [ "$1" = "$2" ] || [ "$(printf '%s\n' "$1" "$2" | sort -V | head -n1)" = "$1" ]; }
+
+SEARCH_ENGINE=""
+SEARCH_ENGINE_VERSION_HINT=""
+MARIADB_VERSION=""
+
+if ver_le "$BASE_VER" "2.4.2"; then
+  SEARCH_ENGINE="elasticsearch"
+  SEARCH_ENGINE_VERSION="7.9"
+  MARIADB_VERSION="10.4"
+elif ver_ge "$BASE_VER" "2.4.3" && ver_le "$BASE_VER" "2.4.5"; then
+  SEARCH_ENGINE="opensearch"
+  SEARCH_ENGINE_VERSION="1.3"
+  MARIADB_VERSION="10.4"
+elif ver_ge "$BASE_VER" "2.4.6" && ver_le "$BASE_VER" "2.4.8"; then
+  SEARCH_ENGINE="opensearch"
+  SEARCH_ENGINE_VERSION="2.12"
+  MARIADB_VERSION="10.6"
+else
+  SEARCH_ENGINE="opensearch"
+  SEARCH_ENGINE_VERSION="3.1"
+  MARIADB_VERSION="11.4"
 fi
 
 if [ -z "$PHP_VERSION" ]; then
   while true; do
-    read -p "PHP version not found. Please enter a valid version (${valid_versions[*]}) or press Enter to use 8.1: " input_version
-    input_version="${input_version:-8.1}"
+    read -p "PHP version not found. Please enter a valid version (${valid_versions[*]}) or press Enter to use 8.4: " input_version
+    input_version="${input_version:-8.4}"
     if is_valid_version "$input_version"; then
       PHP_VERSION="$input_version"
       break
@@ -303,9 +357,9 @@ fi
 echo "Using PHP version: $PHP_VERSION"
 
 # output only after full result
-echo "$(init_project ${PHP_VERSION})"
+echo "$(init_project ${PHP_VERSION} ${SEARCH_ENGINE} ${SEARCH_ENGINE_VERSION} ${MARIADB_VERSION})"
 
-CODE_FILE="$(ls  php*.code.tar.gz code.tgz 2>/dev/null | sort -V | tail -n1)"
+CODE_FILE="$(ls  php*.code.t*z code.tgz 2>/dev/null | sort -V | tail -n1)"
 DATABASE_FILE="$(ls  php*.database.sql.gz database.sql.gz 2>/dev/null | sort -V | tail -n1)"
 
 if [ -n "$CLOUD_PROJECT_ID" ]
@@ -322,9 +376,9 @@ then
 
   if [ "${NEED_DUMPS:-1}" -eq 1 ]; then
     echo "Creating dumps..."
-    cloud-teleport ${SSH_HOST} dump
+    cloud-dump ${SSH_HOST} -l -s200
     echo "Dumps created successfully!"
-    CODE_FILE="$(ls  php*.code.tar.gz code.tgz 2>/dev/null | sort -V | tail -n1)"
+    CODE_FILE="$(ls  php*.code.t*z code.tgz 2>/dev/null | sort -V | tail -n1)"
     DATABASE_FILE="$(ls  php*.database.sql.gz database.sql.gz 2>/dev/null | sort -V | tail -n1)"
   fi
 fi
@@ -351,6 +405,9 @@ unpack_code () {
     else
       tar -xzf $CODE_FILE -C ./source
     fi
+  else
+    echo "Code file not found."
+    exit 1
   fi
 }
 
@@ -374,7 +431,7 @@ then
   read -p "Do you want to re-import database dump? (y/n, default 'n'): " response
   response=${response:-n}
   if [[ "$response" != "y" ]]; then
-    echo "Code unpacking skipped."
+    echo "Database import skipped."
   else
     DB_IMPORT=1
     sed_commands="sed -e 's/DEFINER[ ]*=[ ]*[^*]*\*/\*/' \
@@ -382,6 +439,8 @@ then
       -e 's/utf8mb4_0900_ai_ci/utf8_general_ci/' \
       -e 's/utf8mb4_unicode_ci/utf8_general_ci/' \
       -e 's/utf8mb4_unicode_520_ci/utf8_general_ci/' \
+      -e 's/utf8mb3/utf8/' \
+      -e 's/utf8mb4/utf8/' \
       -e 's/CHARSET=utf8mb4/CHARSET=utf8/g' \
       -e 's/AFTER[ ]\(INSERT\)\{0,1\}\(UPDATE\)\{0,1\}\(DELETE\)\{0,1\}[ ]ON[ ][\`][A-Za-z0-9_]*[\`][.]/AFTER \1\2\3 ON /' \
       | grep -v 'mysqldump: Couldn.t find table' | grep -v 'mysqldump: Couldn.t execute' | grep -v 'Warning: Using a password' \
@@ -393,9 +452,12 @@ then
     else
       gunzip -cf ../${DATABASE_FILE} | eval $sed_commands
     fi
+
+    echo "[" $(date -u) "Removing key, password and login like keys from core_config_data table"
+    echo "UPDATE core_config_data SET value=NULL WHERE path like '%_key%' or path like '%_login%' or path like '%password%';" | warden db import
   fi
 #  echo -e "\033[0m"
-#  echo "[" $(date -u) "Import of db dump finished"
+  echo "[" $(date -u) "Import of db dump finished"
 fi
 
 wait

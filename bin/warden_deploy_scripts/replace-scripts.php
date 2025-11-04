@@ -1,10 +1,46 @@
 <?php
+$magentoRootDir = dirname(__DIR__);
+
+$envFile = $magentoRootDir . '/.env';
+
+if (!is_readable($envFile)) {
+    fwrite(STDERR, "⚠️  File .env not found in " . __DIR__ . "\n");
+    exit(1);
+}
+
+// Прочитати файл і завантажити кожну змінну в $_ENV
+foreach (file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+    $line = trim($line);
+    if ($line === '' || str_starts_with($line, '#')) {
+        continue;
+    }
+
+    // підтримка формату KEY=value або KEY="value"
+    if (preg_match('/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/', $line, $matches)) {
+        $key = $matches[1];
+        $value = trim($matches[2], " \t\n\r\0\x0B\"'");
+        $_ENV[$key] = $value;
+        putenv("$key=$value");
+    }
+}
+
+// Визначення пошукового рушія
+if (($_ENV['WARDEN_OPENSEARCH'] ?? '0') === '1') {
+    $_ENV['SEARCH_ENGINE'] = 'opensearch';
+    $_ENV['SEARCH_VERSION'] = $_ENV['OPENSEARCH_VERSION'] ?? '';
+} elseif (($_ENV['WARDEN_ELASTICSEARCH'] ?? '0') === '1') {
+    $_ENV['SEARCH_ENGINE'] = 'elasticsearch';
+    $_ENV['SEARCH_VERSION'] = $_ENV['ELASTICSEARCH_VERSION'] ?? '';
+} else {
+    $_ENV['SEARCH_ENGINE'] = 'none';
+    $_ENV['SEARCH_VERSION'] = '';
+}
+
 //var_dump(getDomainsFromEnv(__DIR__));
 //echo PHP_EOL;
 //die;
 $command = $argv[1] ?? null;
 
-$magentoRootDir = dirname(__DIR__);
 try {
     switch ($command) {
         case 'conf':
@@ -252,9 +288,15 @@ WHERE c.path IN({$patchWhere})");
     $db->query("UPDATE core_config_data SET value = 'varnish' WHERE path = 'system/full_page_cache/varnish/backend_host'");
     $db->query("UPDATE core_config_data SET value = '80' WHERE path = 'system/full_page_cache/varnish/backend_port'");
     $db->query("UPDATE core_config_data SET value = 'elasticsearch' WHERE path = 'catalog/search/elasticsearch7_server_hostname'");
-    $db->query("UPDATE core_config_data SET value = 'elasticsearch' WHERE path = 'amasty_elastic/connection/server_hostname'");
+    $db->query("UPDATE core_config_data SET value = 'elasticsearch' WHERE path = 'catalog/search/elasticsearch8_server_hostname'");
+    $db->query("UPDATE core_config_data SET value = 'opensearch' WHERE path = 'catalog/search/opensearch_server_hostname'");
+    $db->query("UPDATE core_config_data SET value = '" . $_ENV['SEARCH_ENGINE'] . "' WHERE path = 'amasty_elastic/connection/server_hostname'");
     $db->query("UPDATE core_config_data SET value = '9200' WHERE path = 'catalog/search/elasticsearch7_server_port'");
+    $db->query("UPDATE core_config_data SET value = '9200' WHERE path = 'catalog/search/elasticsearch8_server_port'");
+    $db->query("UPDATE core_config_data SET value = '9200' WHERE path = 'catalog/search/opensearch_server_port'");
     $db->query("UPDATE core_config_data SET value = '9200' WHERE path = 'amasty_elastic/connection/server_port'");
+    $db->query("UPDATE core_config_data SET value = '" . $_ENV['SEARCH_ENGINE'] . "' WHERE path = 'smile_elasticsuite_core_base_settings/es_client/servers'");
+    $db->query("UPDATE core_config_data SET value = 'X-Forwarded-Proto' WHERE path = 'web/secure/offloader_header'");
 
 
     $magentoVarsContent = "";
@@ -416,12 +458,16 @@ function replaceEnvConfig($path) {
         $configPatcher->replaceIfExists('cache.frontend.default.backend_options', $redisSettings);
     }
     $configPatcher->replaceIfExists('cache.frontend.page_cache.backend_options', $redisSettings);
-    $configPatcher->replaceIfExists('system.default.smile_elasticsuite_core_base_settings.es_client.servers', 'elasticsearch:9200');
+    $configPatcher->replaceIfExists('system.default.smile_elasticsuite_core_base_settings.es_client.servers', $_ENV['SEARCH_ENGINE'] . ':9200');
     $configPatcher->replaceIfExists('system.default.catalog.search.elasticsearch7_server_hostname', 'elasticsearch');
+    $configPatcher->replaceIfExists('system.default.catalog.search.elasticsearch8_server_hostname', 'elasticsearch');
+    $configPatcher->replaceIfExists('system.default.catalog.search.opensearch_server_hostname', 'opensearch');
     $configPatcher->replaceIfExists('system.default.system.security.max_session_size_admin', '1024000');
     $configPatcher->replaceIfExists('system.default.system.full_page_cache.varnish.backend_port', '80');
     $configPatcher->replaceIfExists('system.default.system.full_page_cache.varnish.backend_host', 'varnish');
+    $configPatcher->replaceIfExists('system.default.web.secure.offloader_header', 'X-Forwarded-Proto');
 
+    // $db->query("UPDATE core_config_data SET value = 'X-Forwarded-Proto' WHERE path = 'web/secure/offloader_header'");
 
     $config = $configPatcher->getConfigArray();
 
